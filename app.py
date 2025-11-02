@@ -58,7 +58,7 @@ def get_history(ticker, period="1y", interval="1d"):
         interval=interval,
         auto_adjust=False,
         progress=False,
-        group_by="column",   # keep flat columns
+        group_by="column",
     )
 
 @st.cache_data(ttl=900)
@@ -126,9 +126,7 @@ st.metric(label=f"{underlying_symbol} — Last price", value=spot)
 hist = get_history(underlying_symbol, period="6mo", interval="1d")
 
 if hist is not None and len(hist) > 0:
-    # Handle both flat and MultiIndex columns robustly
     close_series = None
-
     if isinstance(hist.columns, pd.MultiIndex):
         key = ("Close", underlying_symbol)
         if key in hist.columns:
@@ -146,7 +144,6 @@ if hist is not None and len(hist) > 0:
         close_series = pd.to_numeric(pd.Series(close_series), errors="coerce").dropna()
         x = pd.to_datetime(close_series.index)
         y = close_series.values
-
         fig_price = go.Figure()
         fig_price.add_trace(go.Scatter(x=x, y=y, mode="lines", name="Close"))
         fig_price.update_layout(
@@ -195,8 +192,6 @@ if not expiries:
     st.warning(f"No option expiries found for {etf_ticker}. Try a different ETF.")
 else:
     sel_exp = st.selectbox("Choose expiry", expiries, index=0)
-
-    # cache-safe: returns plain DataFrames
     calls, puts = get_option_chain_df(etf_ticker, sel_exp)
 
     spot_etf = get_spot_price(etf_ticker)
@@ -230,12 +225,13 @@ else:
     calls_g, puts_g = add_greeks(calls, "call"), add_greeks(puts, "put")
 
     iv_calls = calls_g[["strike","impliedVolatility"]].rename(columns={"impliedVolatility":"IV"}); iv_calls["type"]="Call"
-    iv_puts = puts_g[["strike","impliedVolatility"]].rename(columns={"impliedVolatility":"IV"}); iv_puts["type"]="Put"
+    iv_puts  = puts_g[["strike","impliedVolatility"]].rename(columns={"impliedVolatility":"IV"});  iv_puts["type"]="Put"
     iv_smile = pd.concat([iv_calls, iv_puts], ignore_index=True).dropna()
 
     if not iv_smile.empty:
+        # No trendline to avoid extra dependency on statsmodels
         fig_smile = px.scatter(iv_smile, x="strike", y="IV", color="type",
-                               title=f"{etf_ticker} — IV Smile ({sel_exp})", trendline="lowess")
+                               title=f"{etf_ticker} — IV Smile ({sel_exp})")
         st.plotly_chart(fig_smile, use_container_width=True)
     else:
         st.info("No IV data available to plot a smile.")
