@@ -9,6 +9,9 @@ from datetime import datetime
 import pytz
 import plotly.graph_objects as go
 import plotly.express as px
+from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
+
 
 st.set_page_config(page_title="Commodity Dashboard", layout="wide")
 
@@ -241,43 +244,89 @@ else:
     st.dataframe(top[["type","contractSymbol","strike","lastPrice","bid","ask",
                       "openInterest","impliedVolatility","delta","gamma","vega","theta","rho"]])
 
-# ------------------ 3D IV Surface ------------------
+# ------------------ 3D IV Surface (ETF proxy, interpolated & smoothed) ------------------
 st.markdown("### 3D IV Surface (ETF proxy)")
 if expiries:
-    max_exp = st.slider("Max expiries to include", min_value=2,
-                        max_value=min(12, len(expiries)),
-                        value=min(6, len(expiries)))
+    max_exp = st.slider("Max expiries to include", min_value=3, max_value=min(16, len(expiries)), value=min(10, len(expiries)))
+    strike_window = st.slider("Strike window around spot (as % of spot)", 50, 250, 160, step=10)
+    iv_cap = st.slider("IV cap (max shown, %)", 50, 300, 200, step=10)
+    min_oi = st.slider("Min open interest filter", 0, 5000, 50, step=50)
+    max_spread_pct = st.slider("Max bid-ask spread (% of mid)", 1, 200, 50, step=5)
+    smooth_sigma = st.slider("Smoothing (Gaussian σ)", 0, 5, 1, help="0 = no smoothing")
+
     chosen_exps = expiries[:max_exp]
-
-    surface_rows = []
+    rows = []
     for e in chosen_exps:
-        ch_calls, ch_puts = get_option_chain_df(etf_ticker, e)
-        df = pd.concat([
-            ch_calls[["strike","impliedVolatility"]].assign(expiry=e),
-            ch_puts[["strike","impliedVolatility"]].assign(expiry=e)
-        ])
-        df = df.groupby(["expiry","strike"], as_index=False)["impliedVolatility"].median()
-        surface_rows.append(df)
+        calls_e, puts_e = get_option_chain_df(etf_ticker, e)
 
-    if surface_rows:
-        surf = pd.concat(surface_rows, ignore_index=True).dropna()
-        piv = surf.pivot_table(index="strike", columns="expiry", values="impliedVolatility")
-        x = piv.columns.tolist()
-        y = piv.index.tolist()
-        z = piv.values
-        if len(x) >= 2 and len(y) >= 3:
-            fig_surface = go.Figure(data=[go.Surface(x=list(range(len(x))), y=y, z=z, showscale=True)])
+        # Mid price & quality filters
+        for df in (calls_e, puts_e):
+            df["mid"] = (df["bid"].fillna(0) + df["ask"].fillna(0)) / 2
+            df["spr_pct"] = np.where(df["mid"] > 0, (df["ask"] - df["bid"]) / df["mid"], np.nan)
+
+        both = pd.concat([calls_e, puts_e], ignore_index=True)
+        both = both[(both["openInterest"].fillna(0) >= min_oi)]
+        both = both[(both["spr_pct"].fillna(0) <= max_spread_pct/100)]
+
+        if both.empty:
+            continue
+
+        # Median IV per strike
+        iv_med = (both.groupby("strike", as_index=False)["impliedVolatility"].median()
+                        .rename(columns={"impliedVolatility":"IV"}))
+        iv_med["expiry"] = e
+        rows.append(iv_med)
+
+    if rows:
+        surf = pd.concat(rows, ignore_index=True).dropna()
+        # Keep within strike window
+        lo = spot_etf * (1 - strike_window/100)
+        hi = spot_etf * (1 + strike_window/100)
+        surf = surf[(surf["strike"] >= lo) & (surf["strike"] <= hi)]
+        # Sanity cap and positive IV only
+        surf = surf[(surf["IV"] > 0) & (surf["IV"] <= iv_cap/100)]
+
+        # Use moneyness so expiries align on x
+        surf["moneyness"] = surf["strike"] / max(spot_etf, 1e-9)
+
+        if not surf.empty:
+            # Build regular grid
+            m_grid = np.linspace(surf["moneyness"].min(), surf["moneyness"].max(), 60)
+            # numeric x for expiries, keep labels
+            exp_idx = {e:i for i, e in enumerate(sorted(surf["expiry"].unique()))}
+            surf["exp_i"] = surf["expiry"].map(exp_idx)
+            x_grid = np.linspace(min(exp_idx.values()), max(exp_idx.values()), len(exp_idx))
+            Xg, Yg = np.meshgrid(x_grid, m_grid)   # X = expiry index, Y = moneyness
+
+            # Interpolate IV to grid
+            points = np.column_stack([surf["exp_i"].values, surf["moneyness"].values])
+            values = surf["IV"].values
+            Z = griddata(points, values, (Xg, Yg), method="linear")
+
+            # Light smoothing (optional)
+            if smooth_sigma > 0:
+                Z = gaussian_filter(Z, sigma=smooth_sigma)
+
+            # Plot surface: x axis labeled by expiry strings
+            tickvals = list(exp_idx.values())
+            ticktext = list(sorted(exp_idx.keys()))
+            fig_surface = go.Figure(data=[
+                go.Surface(x=Xg, y=Yg, z=Z, colorscale="Viridis", showscale=True)
+            ])
             fig_surface.update_layout(
                 title=f"{etf_ticker} — IV Surface",
                 scene=dict(
-                    xaxis_title="Expiry index (earlier → later)",
-                    yaxis_title="Strike",
-                    zaxis_title="IV"
+                    xaxis_title="Expiry",
+                    xaxis=dict(tickmode="array", tickvals=tickvals, ticktext=ticktext),
+                    yaxis_title="Moneyness (K/S)",
+                    zaxis_title="IV",
+                    zaxis=dict(tickformat=".0%")
                 ),
-                margin=dict(l=0,r=0,b=0,t=30)
+                margin=dict(l=0, r=0, b=0, t=40)
             )
             st.plotly_chart(fig_surface, use_container_width=True)
         else:
-            st.info("Not enough strikes/expiries to render a 3D surface.")
+            st.info("Not enough data after filters to render a surface. Relax filters or widen the window.")
     else:
         st.info("No expiries returned for surface.")
+
