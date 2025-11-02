@@ -52,8 +52,15 @@ def get_spot_price(ticker):
 
 @st.cache_data(ttl=900)
 def get_history(ticker, period="1y", interval="1d"):
-    return yf.download(ticker, period=period, interval=interval,
-                       auto_adjust=False, progress=False)
+    return yf.download(
+        ticker,
+        period=period,
+        interval=interval,
+        auto_adjust=False,
+        progress=False,
+        group_by="column",   # <- prevents MultiIndex columns
+    )
+
 
 @st.cache_data(ttl=900)
 def get_options(ticker):
@@ -116,28 +123,38 @@ st.metric(label=f"{underlying_symbol} — Last price", value=spot)
 hist = get_history(underlying_symbol, period="6mo", interval="1d")
 
 if hist is not None and len(hist) > 0:
-    # Pick a price column robustly
-    close_col = None
-    for c in ["Close", "Adj Close", "close", "adjclose"]:
-        if c in hist.columns:
-            close_col = c
-            break
+    # Handle both flat and MultiIndex columns robustly
+    close_series = None
 
-    if close_col is not None:
-        x = pd.to_datetime(hist.index)
-        y = pd.to_numeric(hist[close_col], errors="coerce")
+    if isinstance(hist.columns, pd.MultiIndex):
+        # Try exact ('Close', ticker) first
+        key = ("Close", underlying_symbol)
+        if key in hist.columns:
+            close_series = hist[key]
+        else:
+            # Fallback: take the first column under 'Close'
+            if "Close" in hist.columns.get_level_values(0):
+                close_slice = hist.xs("Close", axis=1, level=0, drop_level=False)
+                close_series = close_slice.iloc[:, 0]
+    else:
+        # Flat columns
+        if "Close" in hist.columns:
+            close_series = hist["Close"]
+        elif "Adj Close" in hist.columns:
+            close_series = hist["Adj Close"]
 
-        # Drop NaNs to keep Plotly happy
-        mask = y.notna()
-        x = x[mask]
-        y = y[mask]
+    if close_series is not None:
+        # Ensure 1-D series of numerics
+        close_series = pd.to_numeric(pd.Series(close_series), errors="coerce").dropna()
+        x = pd.to_datetime(close_series.index)
+        y = close_series.values
 
         fig_price = go.Figure()
-        fig_price.add_trace(go.Scatter(x=x, y=y, mode="lines", name=close_col))
+        fig_price.add_trace(go.Scatter(x=x, y=y, mode="lines", name="Close"))
         fig_price.update_layout(
             title=f"{underlying_symbol} — 6M Price",
             xaxis_title="Date",
-            yaxis_title=close_col,
+            yaxis_title="Close",
             margin=dict(l=0, r=0, t=40, b=0),
         )
         st.plotly_chart(fig_price, use_container_width=True)
