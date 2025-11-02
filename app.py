@@ -58,9 +58,8 @@ def get_history(ticker, period="1y", interval="1d"):
         interval=interval,
         auto_adjust=False,
         progress=False,
-        group_by="column",   # <- prevents MultiIndex columns
+        group_by="column",   # keep flat columns
     )
-
 
 @st.cache_data(ttl=900)
 def get_options(ticker):
@@ -68,8 +67,12 @@ def get_options(ticker):
     return t.options or []
 
 @st.cache_data(ttl=900)
-def get_option_chain(ticker, expiry):
-    return yf.Ticker(ticker).option_chain(expiry)
+def get_option_chain_df(ticker, expiry):
+    """Return calls & puts as plain DataFrames (cache-safe)."""
+    oc = yf.Ticker(ticker).option_chain(expiry)
+    calls = oc.calls.reset_index(drop=True).copy()
+    puts  = oc.puts.reset_index(drop=True).copy()
+    return calls, puts
 
 @st.cache_data(ttl=900)
 def get_futures_curve(symbols):
@@ -127,24 +130,19 @@ if hist is not None and len(hist) > 0:
     close_series = None
 
     if isinstance(hist.columns, pd.MultiIndex):
-        # Try exact ('Close', ticker) first
         key = ("Close", underlying_symbol)
         if key in hist.columns:
             close_series = hist[key]
-        else:
-            # Fallback: take the first column under 'Close'
-            if "Close" in hist.columns.get_level_values(0):
-                close_slice = hist.xs("Close", axis=1, level=0, drop_level=False)
-                close_series = close_slice.iloc[:, 0]
+        elif "Close" in hist.columns.get_level_values(0):
+            close_slice = hist.xs("Close", axis=1, level=0, drop_level=False)
+            close_series = close_slice.iloc[:, 0]
     else:
-        # Flat columns
         if "Close" in hist.columns:
             close_series = hist["Close"]
         elif "Adj Close" in hist.columns:
             close_series = hist["Adj Close"]
 
     if close_series is not None:
-        # Ensure 1-D series of numerics
         close_series = pd.to_numeric(pd.Series(close_series), errors="coerce").dropna()
         x = pd.to_datetime(close_series.index)
         y = close_series.values
@@ -197,8 +195,9 @@ if not expiries:
     st.warning(f"No option expiries found for {etf_ticker}. Try a different ETF.")
 else:
     sel_exp = st.selectbox("Choose expiry", expiries, index=0)
-    chain = get_option_chain(etf_ticker, sel_exp)
-    calls, puts = chain.calls.copy(), chain.puts.copy()
+
+    # cache-safe: returns plain DataFrames
+    calls, puts = get_option_chain_df(etf_ticker, sel_exp)
 
     spot_etf = get_spot_price(etf_ticker)
     try:
@@ -256,10 +255,10 @@ if expiries:
 
     surface_rows = []
     for e in chosen_exps:
-        ch = get_option_chain(etf_ticker, e)
+        ch_calls, ch_puts = get_option_chain_df(etf_ticker, e)
         df = pd.concat([
-            ch.calls[["strike","impliedVolatility"]].assign(expiry=e),
-            ch.puts[["strike","impliedVolatility"]].assign(expiry=e)
+            ch_calls[["strike","impliedVolatility"]].assign(expiry=e),
+            ch_puts[["strike","impliedVolatility"]].assign(expiry=e)
         ])
         df = df.groupby(["expiry","strike"], as_index=False)["impliedVolatility"].median()
         surface_rows.append(df)
