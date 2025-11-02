@@ -114,22 +114,37 @@ spot = get_spot_price(underlying_symbol)
 st.metric(label=f"{underlying_symbol} — Last price", value=spot)
 
 hist = get_history(underlying_symbol, period="6mo", interval="1d")
-if not hist.empty:
-    # Robust: always take index as the time axis, regardless of its name
-    df_price = hist.loc[:, ["Close"]].copy()
-    if "Close" not in df_price.columns:
-        # fallback if only Adjusted is present
-        if "Adj Close" in hist.columns:
-            df_price = hist.loc[:, ["Adj Close"]].rename(columns={"Adj Close": "Close"})
-        else:
-            st.info("No Close/Adj Close available to plot.")
-            df_price = None
 
-    if df_price is not None:
-        df_price["ts"] = df_price.index
-        fig_price = px.line(df_price, x="ts", y="Close", title=f"{underlying_symbol} — 6M Price")
-        fig_price.update_layout(xaxis_title="Date", yaxis_title="Close")
+if hist is not None and len(hist) > 0:
+    # Pick a price column robustly
+    close_col = None
+    for c in ["Close", "Adj Close", "close", "adjclose"]:
+        if c in hist.columns:
+            close_col = c
+            break
+
+    if close_col is not None:
+        x = pd.to_datetime(hist.index)
+        y = pd.to_numeric(hist[close_col], errors="coerce")
+
+        # Drop NaNs to keep Plotly happy
+        mask = y.notna()
+        x = x[mask]
+        y = y[mask]
+
+        fig_price = go.Figure()
+        fig_price.add_trace(go.Scatter(x=x, y=y, mode="lines", name=close_col))
+        fig_price.update_layout(
+            title=f"{underlying_symbol} — 6M Price",
+            xaxis_title="Date",
+            yaxis_title=close_col,
+            margin=dict(l=0, r=0, t=40, b=0),
+        )
         st.plotly_chart(fig_price, use_container_width=True)
+    else:
+        st.info("No Close/Adj Close column available to plot.")
+else:
+    st.info("No historical data returned to plot.")
 
 # ------------------ Futures Curve ------------------
 st.markdown("### Futures Curve (simple)")
