@@ -115,8 +115,21 @@ st.metric(label=f"{underlying_symbol} — Last price", value=spot)
 
 hist = get_history(underlying_symbol, period="6mo", interval="1d")
 if not hist.empty:
-    fig_price = px.line(hist.reset_index(), x="Date", y="Close", title=f"{underlying_symbol} — 6M Price")
-    st.plotly_chart(fig_price, use_container_width=True)
+    # Robust: always take index as the time axis, regardless of its name
+    df_price = hist.loc[:, ["Close"]].copy()
+    if "Close" not in df_price.columns:
+        # fallback if only Adjusted is present
+        if "Adj Close" in hist.columns:
+            df_price = hist.loc[:, ["Adj Close"]].rename(columns={"Adj Close": "Close"})
+        else:
+            st.info("No Close/Adj Close available to plot.")
+            df_price = None
+
+    if df_price is not None:
+        df_price["ts"] = df_price.index
+        fig_price = px.line(df_price, x="ts", y="Close", title=f"{underlying_symbol} — 6M Price")
+        fig_price.update_layout(xaxis_title="Date", yaxis_title="Close")
+        st.plotly_chart(fig_price, use_container_width=True)
 
 # ------------------ Futures Curve ------------------
 st.markdown("### Futures Curve (simple)")
